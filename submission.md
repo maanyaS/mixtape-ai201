@@ -206,7 +206,51 @@ calendar day since the last listen → increment," independent of weekday.
 - **Full suite:** all 5 streak tests pass; the only remaining failures are the
   unrelated playlist bug (#5). No regressions introduced.
 
-<!-- Bugs #5 and #2 to follow. Reproduction notes captured earlier:
-  #5 get_playlist_songs() returns songs[:-1] — see tests/test_playlists.py failures.
-  #2 feed RECENT_THRESHOLD = timedelta(hours=24) too wide for a "now" feed. -->
+### Bug #5 — The last song in a playlist never shows up
+
+**How I reproduced it.** With the streak fix already in place, running
+`.venv\Scripts\python.exe -m pytest tests/ -q` left two failures, both in
+`tests/test_playlists.py`. The `seed_playlist` fixture builds a playlist with 5
+songs (`Track 1`–`Track 5`) at positions 1–5. Calling
+`get_playlist_songs(playlist_id)` then:
+- `test_playlist_returns_all_songs` failed with `assert 4 == 5` — only 4 songs
+  came back.
+- `test_playlist_returns_songs_in_order` failed showing the list ended at
+  `Track 4`; `Track 5` was missing.
+
+The condition that triggers it: *any* non-empty playlist. The song that
+disappears is always the one at the highest `position`.
+
+**How I found the root cause.** The failing tests import `get_playlist_songs`
+directly, so I opened
+[services/playlist_service.py](services/playlist_service.py) and read that
+function top to bottom. The SQL was correct — it joins `playlist_entries`,
+filters by `playlist_id`, and orders by `asc(position)`, so `songs` holds all 5
+rows in the right order. The certainty came at the `return` statement (line 66):
+`return [song.to_dict() for song in songs[:-1]]`. The `[:-1]` slice, applied
+*after* a correct query, is exactly a drop-the-last-element operation — matching
+"returns 4, expected 5" and "last song missing" precisely. The misleading
+docstring ("returns all songs in the playlist") confirmed the slice was
+unintended, not a deliberate filter.
+
+**The root cause.** Python's `list[:-1]` slice returns every element *except the
+last one*. The query produced the complete, correctly ordered list of songs, but
+the return statement sliced off the final element before serializing. Because the
+rows are ordered by ascending `position`, the dropped element is always the
+last-positioned song — so the highest-position track in every non-empty playlist
+was silently omitted from the response.
+
+**My fix and side-effect check.** Changed `songs[:-1]` back to `songs` in the
+comprehension — one character-range edit, no other logic touched.
+- **Both sides of the boundary:** `test_playlist_returns_all_songs` and
+  `test_playlist_returns_songs_in_order` now pass (all 5 songs, correct order —
+  the "many songs" side); `test_empty_playlist_returns_empty_list` still passes
+  (an empty playlist returns `[]` — the "zero songs" side, which the old
+  `[:-1]` would also have returned as `[]`, but now for the right reason).
+- **Related feature check:** searched for other users of the same data.
+  `add_to_playlist()` in `notification_service.py` mutates the playlist via the
+  `playlist.songs` relationship, not `get_playlist_songs()`, so it is unaffected;
+  no route or service other than `routes/playlists.py::get_songs` consumes this
+  function.
+- **Full suite:** 13 passed, 0 failed. No regressions.
 
