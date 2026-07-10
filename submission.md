@@ -254,3 +254,59 @@ comprehension — one character-range edit, no other logic touched.
   function.
 - **Full suite:** 13 passed, 0 failed. No regressions.
 
+### Bug #2 — Friends Listening Now shows people from yesterday
+
+**How I reproduced it.** No test exists for this, so I drove the service against
+an in-memory DB. I created a user `me` with two friends: `recent` (one
+`ListeningEvent` 10 minutes ago) and `stale` (one `ListeningEvent` 10 hours
+ago), then called `get_friends_listening_now(me.id)`. Before the fix the feed
+returned **both** friends — `stale` appeared even though a 10-hour-old listen is
+in no sense "listening now." The triggering condition: any friend whose most
+recent listening event is older than a real "now" window but still within the
+past 24 hours.
+
+**How I found the root cause.** The feed route
+([routes/feed.py](routes/feed.py)) delegates straight to
+[`get_friends_listening_now()`](services/feed_service.py#L16), so I opened
+[services/feed_service.py](services/feed_service.py). The query itself is sound:
+it filters `ListeningEvent.listened_at >= cutoff` and dedupes to the most recent
+event per friend. The certainty came one line up, at the definition of `cutoff`:
+`cutoff = datetime.now(timezone.utc) - RECENT_THRESHOLD`, where
+`RECENT_THRESHOLD = timedelta(hours=24)` (line 13). Cross-checking against
+`seed_data.py`, whose comments state that events "within the past 30 minutes"
+*should* appear and events "1–14 days ago" should *not*, confirmed the intended
+window is minutes, not a full day — the constant was simply set far too wide.
+
+**The root cause.** The "recency" cutoff for the live *listening now* feed was
+`timedelta(hours=24)`. "Listening now" is meant to be a near-real-time window
+(minutes), but a 24-hour threshold admits every friend who listened at any point
+in the past day. So a friend who last listened hours ago — or up to a full day
+ago — was still reported as currently listening. The filter comparison was
+correct; the constant it compared against encoded the wrong window.
+
+**My fix and side-effect check.** Narrowed the constant to
+`RECENT_THRESHOLD = timedelta(minutes=30)`, matching the "past 30 minutes"
+window the seed data documents. Single-constant change; the query logic is
+untouched.
+- **Both sides of the boundary:** verified directly that a friend who listened
+  **10 minutes ago** *is* included and a friend who listened **10 hours ago** is
+  *excluded* — the feed returned exactly `['recent']`.
+- **Related feature check:** the other function in the file,
+  `get_activity_feed()`, intentionally does **not** use `RECENT_THRESHOLD` (its
+  docstring says it is "not filtered by recency" and returns the most recent N
+  events), so narrowing the constant does not affect it. No other module
+  references `RECENT_THRESHOLD`.
+- **Full suite:** 13 passed, 0 failed. No regressions.
+
+---
+
+## Summary
+
+Three distinct bugs, three targeted fixes, each a single line:
+
+| Issue | File | Change | Root cause in one line |
+|---|---|---|---|
+| #1 streak resets | `services/streak_service.py` | drop `and today.weekday() != 6` | `weekday()==6` (Sunday) wrongly blocked the consecutive-day increment |
+| #5 last song missing | `services/playlist_service.py` | `songs[:-1]` → `songs` | slice dropped the highest-position song after a correct query |
+| #2 stale "listening now" | `services/feed_service.py` | `hours=24` → `minutes=30` | recency window was a full day instead of a near-real-time window |
+
