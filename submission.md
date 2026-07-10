@@ -1,5 +1,53 @@
 # Mixtape — Codebase Map
 
+## AI Usage
+
+I used an AI coding assistant throughout this project. Being specific about how:
+
+**What I asked it to explain, trace, and summarize.**
+- I had it read `app.py` and explain the module — it correctly walked through the
+  `create_app()` factory, the deferred blueprint imports, and why `db` is defined
+  unbound at import time (to avoid circular imports). This was accurate and saved
+  me reading the Flask factory pattern from scratch.
+- I asked it to map the whole repo and trace one real data flow end-to-end
+  (adding a song to a playlist → notification). It produced the routes → services
+  → models breakdown and the "how `add_to_playlist()` notifies the sharer" trace
+  that became the codebase-map section below. I spot-checked the trace against
+  `notification_service.py` myself and it held up.
+- It summarized the data model (the `playlist_entries` join table carrying
+  `position`/`added_by`, the single `ListeningEvent` stream feeding both streaks
+  and feeds). This framing genuinely helped me understand *why* certain bugs live
+  where they do.
+
+**What it helped me understand.** The biggest value was orientation — where logic
+lives (all business logic in `services/`, routes stay thin, errors flow up as
+`ValueError`). Once I understood that pattern, tracing each bug from route →
+service was fast.
+
+**Where I had to verify, and where it was wrong or incomplete.**
+- **It first told me this wasn't a git repo.** When I asked how to push, its
+  earlier reasoning had assumed no git repo existed; it had to actually run
+  `git rev-parse` to discover the project *was* a repo, already on a
+  `bugfix/mixtape` branch with a GitHub remote, with Bug #1 already committed. I
+  had to make it check the real state rather than trust its first assumption.
+- **It over-claimed that `test_search.py` reproduces Bug #3.** It initially
+  implied the search-duplicate bug would show up in the test suite. When we
+  actually ran `pytest`, all search tests *passed* — SQLAlchemy's identity map
+  collapses the duplicate `Song` rows from the `outerjoin` before `to_dict()`, so
+  the duplication never reaches the assertions. The AI corrected itself only
+  after seeing the run output. Lesson: I ran the tests rather than trusting the
+  claim that a bug was "covered."
+- **Boundary verification was on me to insist on.** For each fix I made it prove
+  *both* sides of the boundary (e.g. streak still resets after a real 2-day gap;
+  the 10-hour-old friend is excluded from "listening now" while the 10-minute one
+  is included) instead of accepting "the failing test passes now."
+
+Net: the AI was strong at reading unfamiliar code and explaining structure, but I
+had to run things myself to catch where its confident summaries didn't match
+actual behavior.
+
+---
+
 Mixtape is a Flask + SQLAlchemy social music app: friends share songs, build
 collaborative playlists, rate songs, track listening streaks, and see what
 their friends are playing. It's organized as a clean three-layer stack —
@@ -310,3 +358,4 @@ Three distinct bugs, three targeted fixes, each a single line:
 | #5 last song missing | `services/playlist_service.py` | `songs[:-1]` → `songs` | slice dropped the highest-position song after a correct query |
 | #2 stale "listening now" | `services/feed_service.py` | `hours=24` → `minutes=30` | recency window was a full day instead of a near-real-time window |
 
+![git log --oneline output showing 3 commits and their messages](images/oneline-results.png)
